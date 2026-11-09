@@ -1,0 +1,17 @@
+{
+  "name": "wflow-skills",
+  "owner": {
+    "name": "wflow.com",
+    "email": "support@wflow.com"
+  },
+  "metadata": {
+    "description": "wflow.com agent skills and the wflow MCP server, packaged as one plugin."
+  },
+  "plugins": [
+    {
+      "name": "wflow",
+      "source": "./",
+      "description": "Agent skills for wflow.com document approval workflows; requires the wflow MCP server."
+    }
+  ]
+}

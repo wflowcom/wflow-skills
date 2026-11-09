@@ -1,0 +1,22 @@
+{
+  "name": "wflow",
+  "displayName": "wflow",
+  "version": "0.0.1",
+  "description": "Agent skills for wflow.com document approval workflows; requires the wflow MCP server.",
+  "author": {
+    "name": "wflow.com",
+    "email": "support@wflow.com"
+  },
+  "homepage": "https://www.wflow.com",
+  "repository": "https://github.com/wflowcom/wflow-skills",
+  "license": "Apache-2.0",
+  "keywords": [
+    "wflow",
+    "mcp",
+    "agent-skills"
+  ],
+  "icon": "./assets/logo.png",
+  "documentationUrl": "https://developers.wflow.com",
+  "supportUrl": "https://support.wflow.com/en/",
+  "privacyPolicyUrl": "https://www.wflow.com/en/privacy-policy"
+}

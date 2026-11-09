@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wflow": {
+      "type": "http",
+      "url": "https://mcp.wflow.com/mcp"
+    }
+  }
+}
