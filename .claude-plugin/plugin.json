@@ -1,7 +1,7 @@
 {
   "name": "wflow",
   "displayName": "wflow",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Agent skills for wflow.com document approval workflows; requires the wflow MCP server.",
   "author": {
     "name": "wflow.com",

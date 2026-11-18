@@ -9,6 +9,7 @@ through the wflow MCP server, so connect it as described below before you use th
 - **approval-paths** — Design, review, export, bulk-edit, create and copy approval paths (approval templates) in wflow.com through the wflow MCP.
 - **audit-trail** — Generate an audit-trail PDF (event history) for wflow.com documents in the "Sent to ERP" (SentToERP) state through the wflow MCP and attach it to each document as a regular attachment.
 - **issued-invoices-import** — Import issued (outgoing) invoices that were created in another system – invoicing tool, e-shop, ERP, a hand-kept Excel – from any xls / xlsx / csv into wflow.com through the wflow MCP, optionally with their PDFs.
+- **missing-recurring-invoices** — For accountants: find regular received invoices (rent, energy, licences, services) missing in wflow.com for a month and prepare an Excel basis for accruals with amount, cost centre, contract, activity and account through the wflow MCP; also releases last month's accruals.
 - **user-management** — Manage users and roles in wflow.com via the wflow MCP: user onboarding (manually or by a template user, also across multiple organizations), creating / editing / auditing a role, delegation (starting and ending a substitution), offboarding (removing a user, optionally with a successor) and a user overview in Excel.
 
 ## Connect the wflow MCP
