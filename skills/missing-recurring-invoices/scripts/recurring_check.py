@@ -17,18 +17,22 @@ Usage:
                                       --period 2026-10 [--date-field …] [--links links.json] --org … --out release.json
   python recurring_check.py report    --result result.json [--details details.json] [--release release.json]
                                       --out report.xlsx
-  python recurring_check.py suggest   --docs docs.json --end 2026-10 [--months 6] [--date-field vatDate] --out list.xlsx
+  python recurring_check.py suggest   --docs docs.json --end 2026-10 [--months 6] [--date-field vatDate]
+                                      [--details details.json] --out list.xlsx
+  python recurring_check.py addrows   --xls list.xlsx --profile profile.json|template --result result.json
+                                      --docs docs.json [--details details.json] --out list_doplneno.xlsx
   python recurring_check.py selftest
 
 docs.json    = list_documents items – one array with all pages merged, or the raw responses (a dict with
                items/totalItems, or a list of such dicts). Duplicates by id and removed documents are dropped.
-details.json = array of get_document responses for result["detailIds"] (collect --kind details).
+details.json = array of get_document responses for the printed / result "detailIds" (collect --kind details).
 confirm.json = [{"row": <list row>, "document": "<number or id>"}] – invoices the user confirmed belong to a
                row although company ID (IČ) / name differ (review kind "Možná došla pod jiným IČ / názvem").
 links.json   = {"<credit/debit note id>": ["<linked document id>", …]} from list_document_links.
 """
 
 import argparse
+import csv
 import datetime as dt
 import difflib
 import json
@@ -103,6 +107,19 @@ TEMPLATE = {
     "activity": "Činnost",
     "account": "Analytický účet",
 }
+HDR_SOURCE = "Zdroj údajů"
+HDR_LIST_ROW = "Řádek v původním Excelu"
+OLD_HDR_LIST_ROW = "Řádek seznamu"
+HDR_LIST_NAME = "Dodavatel v seznamu"
+SOURCE_HELP = [
+    ("seznam", "údaj z vašeho seznamu pravidelných plateb"),
+    ("historie", "převzato z poslední faktury dodavatele ve wflow"),
+    (
+        "historie (rozpad)",
+        "dohad rozdělen na střediska / zakázky ve stejném poměru jako poslední faktura",
+    ),
+    ("částka: průměr z N faktur", "částka v seznamu chybí, použit průměr posledních faktur"),
+]
 # exact tokens only (after removing diacritics) – no prefix guessing, "čer" is ambiguous on purpose
 MONTH_FORMS = {
     1: "leden ledna lednu led jan january",
@@ -958,6 +975,32 @@ def accounting_split(det):
     return [(b / total, dict(zip(ACC_FIELDS, k))) for k, b in sorted(groups.items(), key=lambda x: -x[1])]
 
 
+def invoice_codes(det):
+    """-> (codes, note); a split invoice gives empty codes so the month check splits the accrual by it."""
+    parts = accounting_split(det)
+    if len(parts) == 1:
+        return parts[0][1], ""
+    diff = [f for f in ACC_FIELDS if len({c[f] for _, c in parts}) > 1]
+    shares = ", ".join(f"{'/'.join(c[f] or '–' for f in diff)} {s * 100:.0f} %" for s, c in parts)
+    return (
+        dict.fromkeys(ACC_FIELDS, ""),
+        f"poslední faktura rozúčtována: {shares} – kódy doplní kontrola měsíce podle faktury",
+    )
+
+
+def apply_codes(row, det):
+    if not det:
+        return
+    codes, note = invoice_codes(det)
+    for f in ACC_FIELDS:
+        if note:
+            row[TEMPLATE[f]] = ""
+        elif not row.get(TEMPLATE[f]):
+            row[TEMPLATE[f]] = codes[f]
+    if note:
+        row["Poznámka"] = "; ".join(x for x in (row.get("Poznámka"), note) if x)
+
+
 def apply_details(res, details):
     by_id = {d.get("id"): d for d in details}
     mapped = set(res.get("mappedFields") or FIELDS)
@@ -996,8 +1039,11 @@ def read_accruals(path):
 
     book = read_book(path)
     sheet = next((n for n in book if "dohad" in str(n).lower() and "rozpu" not in str(n).lower()), None)
+    if sheet is None and len(book) == 1:
+        sheet = next(iter(book))
     if sheet is None:
         raise SystemExit('The file has no sheet "Podklad pro dohady".')
+    named = "dohad" in str(sheet).lower()
     data = book[sheet]
     hdr = [text(h) for h in data[0]]
 
@@ -1010,12 +1056,14 @@ def read_accruals(path):
         "description": col("popis"),
         "keyword": col("klíčové"),
         "amount": col("částka"),
-        "row": col("řádek seznamu"),
+        "row": col(HDR_LIST_ROW.lower(), OLD_HDR_LIST_ROW.lower()),
     }
     for f in ACC_FIELDS:
         ci[f] = col(ACC_LABEL[f].lower())
     if ci["name"] is None or ci["amount"] is None:
         raise SystemExit('Sheet "Podklad pro dohady" has no columns "Firma / osoba" and "Částka".')
+    if not named and ci["row"] is None:
+        raise SystemExit(f'The file is not an accruals file: no column "{HDR_LIST_ROW}".')
     out = []
     for n, r in enumerate(data[1:], start=2):
 
@@ -1203,6 +1251,10 @@ def cmd_report(a):
     print(json.dumps(s, ensure_ascii=False))
 
 
+def report_amount(x, with_vat):
+    return x.get("totalAmount") if with_vat else x.get("taxExclusiveAmount")
+
+
 def write_report(res, out, rel=None):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -1259,6 +1311,11 @@ def write_report(res, out, rel=None):
         ]
     for k, v in info:
         ws.append([k, v])
+    ws.append([])
+    ws.append([HDR_SOURCE])
+    ws.cell(ws.max_row, 1).font = Font(bold=True)
+    for k, v in SOURCE_HELP:
+        ws.append([k, v])
     warns = res.get("warnings") or []
     issues = res.get("listIssues") or []
     if warns or issues:
@@ -1273,6 +1330,8 @@ def write_report(res, out, rel=None):
 
     acc_cols = ["costCenter", "contract"] + (["project"] if show_project else []) + ["activity", "account"]
     amt_label = "Částka CZK s DPH" if res.get("amountWithVat") else "Částka CZK bez DPH"
+    with_vat = bool(res.get("amountWithVat"))
+    amount_hdr = "Celkem s DPH" if with_vat else "Částka bez DPH"
     rows = []
     for m in res["missing"]:
         li = m.get("lastInvoice") or {}
@@ -1307,7 +1366,7 @@ def write_report(res, out, rel=None):
         ws,
         ["Firma / osoba", "IČ", "Popis", amt_label]
         + [ACC_LABEL[f] for f in acc_cols]
-        + ["Doplněno z historie", "Poslední došlá faktura", "Její datum", "Poznámka", "Klíčové slovo", "Řádek seznamu"],
+        + [HDR_SOURCE, "Poslední došlá faktura", "Její datum", "Poznámka", "Klíčové slovo", HDR_LIST_ROW],
         rows,
         [30, 11, 34, 16] + [13] * len(acc_cols) + [28, 20, 12, 40, 14, 9],
     )
@@ -1326,7 +1385,7 @@ def write_report(res, out, rel=None):
             {"text": x["number"], "url": x["link"]},
             x["partnerName"],
             x["date"],
-            x["totalAmount"],
+            report_amount(x, with_vat),
             x["currency"],
             FLOW_LABEL.get(x["flowStatus"], x["flowStatus"]),
             "ne" if x["notInErp"] else "ano",
@@ -1338,12 +1397,12 @@ def write_report(res, out, rel=None):
     sheet(
         ws,
         [
-            "Řádek seznamu",
+            HDR_LIST_NAME,
             "Popis v seznamu",
             "Číslo faktury",
             "Dodavatel",
             res["dateLabel"],
-            "Celkem s DPH",
+            amount_hdr,
             "Měna",
             "Stav ve wflow",
             "V ERP",
@@ -1364,7 +1423,7 @@ def write_report(res, out, rel=None):
             {"text": x.get("number") or "", "url": x.get("link")},
             x.get("partnerName") or "",
             x.get("date") or "",
-            x.get("totalAmount"),
+            report_amount(x, with_vat),
             x.get("note") or "",
         ]
         for x in res["review"]
@@ -1374,11 +1433,11 @@ def write_report(res, out, rel=None):
         ws,
         [
             "Co zkontrolovat",
-            "Řádek seznamu / dodavatel",
+            HDR_LIST_NAME,
             "Faktura",
             "Dodavatel na faktuře",
             res["dateLabel"],
-            "Celkem s DPH",
+            amount_hdr,
             "Poznámka",
         ],
         rows,
@@ -1489,8 +1548,8 @@ def median(vals):
     return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
 
 
-def suggest(docs, end, months_n, field):
-    months = [shift(end, -k) for k in range(months_n - 1, -1, -1)]
+def counted_groups(docs, months, field):
+    """-> (invoices per supplier, IČ-merge note per supplier, months with data, skipped)"""
     groups = defaultdict(list)
     seen_months = set()
     cancelled = cancelled_ids(docs, field)
@@ -1522,11 +1581,18 @@ def suggest(docs, end, months_n, field):
             ic_note[main] = (
                 f"faktury pod různými IČ ({', '.join(ics)}) – ověřte správné IČ; u faktury s jiným IČ může být překlep"
             )
-    # history in wflow may start later than the window – judge regularity on the months that have data
-    covered = len([m for m in months if seen_months and m >= min(seen_months)]) or months_n
-    out: list = []
+    return groups, ic_note, seen_months, skipped
 
-    def candidate(docs_, keyword, note=""):
+
+def coverage(months, seen_months):
+    """History in wflow may start later than the window – judge regularity on the months that have data."""
+    return len([m for m in months if seen_months and m >= min(seen_months)]) or len(months)
+
+
+def supplier_rows(g, months, covered, field, with_vat=False, default_freq=None, note=""):
+    """-> template rows for one supplier's invoices, split by description when it has several payments"""
+
+    def candidate(docs_, keyword, note="", default=None):
         by_m = defaultdict(list)
         for d in docs_:
             by_m[month_of(doc_date(d, field))].append(d)
@@ -1538,6 +1604,7 @@ def suggest(docs, end, months_n, field):
             freq = "měsíčně"
         elif len(hit) >= 2 and all((b - a) % 3 == 0 for a, b in zip(idx, idx[1:])):
             freq, mon = "čtvrtletně", sorted({(nums[0] - 1 + 3 * i) % 12 + 1 for i in range(4)})
+        freq = freq or default
         if not freq:
             return None
         per = max(len(v) for v in by_m.values())
@@ -1549,7 +1616,10 @@ def suggest(docs, end, months_n, field):
         docs_ = sorted(docs_, key=lambda d: doc_date(d, field) or "")
         last = docs_[-1]
         # median of the last 3 invoices – one unusual invoice (extra work, price change) does not move it
-        pairs = [(d, czk(d, "taxExclusiveAmount") or czk(d, "totalAmount")) for d in docs_[-3:]]
+        pairs = [
+            (d, czk(d, "totalAmount") if with_vat else czk(d, "taxExclusiveAmount") or czk(d, "totalAmount"))
+            for d in docs_[-3:]
+        ]
         bases = [b for _, b in pairs if b]
         amount = round(median(bases), 2) if bases else None
         notes = [note] if note else []
@@ -1570,7 +1640,9 @@ def suggest(docs, end, months_n, field):
                 )
         foreign = sorted({(d.get("currency") or "").upper() for d in docs_} - {"", "CZK"})
         if foreign:
-            fc = Counter(d.get("taxExclusiveAmount") or d.get("totalAmount") for d in docs_).most_common(1)[0][0]
+            fc = Counter(
+                d.get("totalAmount") if with_vat else d.get("taxExclusiveAmount") or d.get("totalAmount") for d in docs_
+            ).most_common(1)[0][0]
             notes.append(
                 f"faktury v {', '.join(foreign)} (obvykle {num(fc)} {foreign[0]}), částka přepočtena "
                 "kurzem z faktur na Kč"
@@ -1603,40 +1675,49 @@ def suggest(docs, end, months_n, field):
             "Faktur za období": len(docs_),
             "Měsíce s fakturou": ", ".join(hit),
             "Poznámka": note,
+            "_detailId": last.get("id"),
         }
 
+    out: list = []
+    by_m = Counter(month_of(doc_date(d, field)) for d in g)
+    clusters = defaultdict(list)
+    for d in g:
+        clusters[desc_key(d.get("description"))].append(d)
+    if max(by_m.values()) > 1 and len(clusters) > 1 and "" not in clusters:
+        made = [
+            candidate(
+                c,
+                first_word(c[0].get("description")),
+                "rozděleno podle popisu faktur (víc plateb od jednoho dodavatele)",
+            )
+            for c in clusters.values()
+        ]
+        out = [m for m in made if m]
+    if not out:
+        c = candidate(g, "", default=default_freq)
+        out = [c] if c else []
+    for r in out:
+        r["Poznámka"] = "; ".join(x for x in (r["Poznámka"], note) if x)
+    return out
+
+
+def suggest(docs, end, months_n, field, details=None):
+    months = [shift(end, -k) for k in range(months_n - 1, -1, -1)]
+    groups, ic_note, seen_months, skipped = counted_groups(docs, months, field)
+    by_id = {d.get("id"): d for d in details or []}
+    out: list = []
     for key, g in groups.items():
-        before = len(out)
-        by_m = Counter(month_of(doc_date(d, field)) for d in g)
-        clusters = defaultdict(list)
-        for d in g:
-            clusters[desc_key(d.get("description"))].append(d)
-        if max(by_m.values()) > 1 and len(clusters) > 1 and "" not in clusters:
-            made = [
-                candidate(
-                    c,
-                    first_word(c[0].get("description")),
-                    "rozděleno podle popisu faktur (víc plateb od jednoho dodavatele)",
-                )
-                for c in clusters.values()
-            ]
-            made = [m for m in made if m]
-            if made:
-                out += made
-        if len(out) == before:
-            c = candidate(g, "")
-            if c:
-                out.append(c)
-        if key in ic_note:
-            for r in out[before:]:
-                r["Poznámka"] = "; ".join(x for x in (r["Poznámka"], ic_note[key]) if x)
+        for r in supplier_rows(g, months, coverage(months, seen_months), field, note=ic_note.get(key, "")):
+            apply_codes(r, by_id.get(r["_detailId"]))
+            out.append(r)
     out.sort(key=lambda r: (str(r[TEMPLATE["name"]]).lower(), str(r[TEMPLATE["keyword"]]).lower()))
     return out, months, skipped
 
 
 def cmd_suggest(a):
     docs, warn = load_docs(a.docs)
-    rows, months, skipped = suggest(docs, a.end, a.months, a.date_field)
+    details = load_json(a.details) if a.details else None
+    rows, months, skipped = suggest(docs, a.end, a.months, a.date_field, details)
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -1670,7 +1751,105 @@ def cmd_suggest(a):
                     if any(w in r["Poznámka"] for w in ("ověřte částku", "různými IČ"))
                 ],
                 "withoutDate": skipped.get("bez data", 0),
+                "detailIds": sorted({r["_detailId"] for r in rows if r["_detailId"]}),
                 "warning": warn,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def added_rows(res, docs, details, with_vat, list_rows=()):
+    """Template rows for the review items "Pravidelný dodavatel mimo seznam" of a match result."""
+    months = res["historyMonths"] + [res["period"]]
+    field = res["dateField"]
+    groups, ic_note, seen, _ = counted_groups(docs, months, field)
+    by_id = {d.get("id"): d for d in details or []}
+    out, done = [], set()
+    for x in res["review"]:
+        if x["kind"] != "Pravidelný dodavatel mimo seznam":
+            continue
+        key = next((k for k, g in groups.items() if any(d["id"] == x.get("id") for d in g)), None)
+        if key is None or key in done:
+            continue
+        done.add(key)
+        # merging by name may pull in invoices of a supplier already on the list (IČ typo)
+        g = [d for d in groups[key] if not any(same_supplier(r, d) for r in list_rows)]
+        if not g:
+            continue
+        rows = supplier_rows(g, months, coverage(months, seen), field, with_vat, "měsíčně", ic_note.get(key, ""))
+        for r in rows:
+            apply_codes(r, by_id.get(r["_detailId"]))
+            out.append(r)
+    return out
+
+
+def write_copy(src, out, profile, rows):
+    """Append template rows to a copy of the user's list; -> values that have no column in the list."""
+    if os.path.abspath(out) == os.path.abspath(src) or (os.path.exists(out) and os.path.samefile(out, src)):
+        raise SystemExit("--out must differ from --xls: the original list is never overwritten.")
+    ext = os.path.splitext(src)[1].lower()
+    if ext not in (".xlsx", ".xlsm", ".csv"):
+        raise SystemExit(f"Cannot write {ext or 'this'} files – save the list as .xlsx or .csv first.")
+    cols = profile.get("columns") or TEMPLATE
+    source = profile.get("source") or {}
+    hr = source.get("headerRow", 1)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from inspect_xls import read_csv, unique_headers
+
+    if ext == ".csv":
+        enc, dialect, data = read_csv(src)
+        hdr = unique_headers([text(h) for h in data[hr - 1]])
+    else:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(src, keep_vba=ext == ".xlsm")
+        ws = wb[source["sheet"]] if source.get("sheet") in wb.sheetnames else wb.worksheets[0]
+        hdr = unique_headers([text(c.value) for c in ws[hr]])
+    at = {f: hdr.index(cols[f]) for f in FIELDS if cols.get(f) and cols[f] in hdr}
+    unmapped = [
+        {"name": r[TEMPLATE["name"]], "field": f, "value": r[TEMPLATE[f]]}
+        for r in rows
+        for f in FIELDS
+        if f not in at and r.get(TEMPLATE[f]) not in (None, "")
+    ]
+    if ext == ".csv":
+        while len(data) > hr and not any(text(v) for v in data[-1]):
+            data.pop()
+        for r in rows:
+            line = [""] * len(hdr)
+            for f, i in at.items():
+                line[i] = text(r.get(TEMPLATE[f]))
+            data.append(line)
+        with open(out, "w", encoding=enc, errors="replace", newline="") as fh:
+            csv.writer(fh, dialect, doublequote=True).writerows(data)
+        return unmapped
+    last = max((c.row for row in ws.iter_rows(min_row=hr) for c in row if text(c.value)), default=hr)
+    for n, r in enumerate(rows, last + 1):
+        for f, i in at.items():
+            v = r.get(TEMPLATE[f])
+            cell = ws.cell(n, i + 1, text(v) if f == "ic" else (None if v == "" else v))
+            if f == "ic":
+                cell.number_format = "@"
+    wb.save(out)
+    return unmapped
+
+
+def cmd_addrows(a):
+    profile = {"columns": TEMPLATE} if a.profile == "template" else load_json(a.profile)
+    docs, _ = load_docs(a.docs)
+    details = load_json(a.details) if a.details else None
+    lst = normalize(a.xls, profile)
+    rows = added_rows(load_json(a.result), docs, details, bool(profile.get("amountWithVat")), lst["rows"])
+    unmapped = write_copy(a.xls, a.out, profile, rows) if rows else []
+    print(
+        json.dumps(
+            {
+                "rows": len(rows),
+                "out": a.out if rows else None,
+                "detailIds": sorted({r["_detailId"] for r in rows if r["_detailId"]}),
+                "unmapped": unmapped,
+                "notes": [{"name": r[TEMPLATE["name"]], "note": r["Poznámka"]} for r in rows if r["Poznámka"]],
             },
             ensure_ascii=False,
         )
@@ -2050,6 +2229,125 @@ def selftest():
     bil = by["Bilance Audit s.r.o."]
     assert bil["Frekvence"] == "čtvrtletně" and "různými IČ" in bil["Poznámka"], bil
     assert cancelled_ids(s_docs, "vatDate") == {"d302"}
+    scratch = tempfile.TemporaryDirectory()
+    # release reads accruals files with the old and the new row header
+    for hdr in (HDR_LIST_ROW, OLD_HDR_LIST_ROW):
+        p = os.path.join(scratch.name, "dohady.csv")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(f"Firma / osoba;IČ;Částka CZK bez DPH;{hdr}\nNájem s.r.o.;12345678;1000;4\nX;1;1;1\n")
+        assert read_accruals(p)[0]["listRow"] == "4", hdr
+    # Došlé / Ke kontrole amounts follow the list's VAT basis
+    r = {"taxExclusiveAmount": 1000, "totalAmount": 1210}
+    assert report_amount(r, False) == 1000 and report_amount(r, True) == 1210
+    assert report_amount({"kind": "Chybí účetní údaje"}, False) is None
+    # Mode 2 codes from the latest invoice; a split invoice leaves every code empty
+    det_ps = {
+        "id": "d400",
+        "accounting": {"activity": {"code": "SPRAVA"}},
+        "accountCode": "518100",
+        "lines": [
+            {"totalAmount": 3600, "costCenter": {"code": "Praha"}},
+            {"totalAmount": 2400, "costCenter": {"code": "Brno"}},
+        ],
+    }
+    codes, note = invoice_codes(det_ps)
+    assert all(v == "" for v in codes.values()) and "Praha 60 %" in note and "Brno 40 %" in note, note
+    one = {
+        "id": "x",
+        "accounting": {"activity": {"code": "SPRAVA"}, "costCenter": {"code": "Praha"}},
+        "accountCode": "518100",
+        "lines": [],
+    }
+    assert invoice_codes(one) == (
+        {"costCenter": "Praha", "contract": "", "project": "", "activity": "SPRAVA", "account": "518100"},
+        "",
+    )
+    p_docs = [
+        doc(410 + j, "12121212", "Parking Servis s.r.o.", f"{m}-05", 6000, "Parkování", acc="518100")
+        for j, m in enumerate(("2026-08", "2026-09", "2026-10"))
+    ]
+    p_docs[-1]["id"] = "d400"
+    sug, _, _ = suggest(p_docs, "2026-10", 3, "vatDate", details=[det_ps])
+    ps = sug[0]
+    assert ps["_detailId"] == "d400"
+    assert all(ps[TEMPLATE[f]] == "" for f in ACC_FIELDS) and "rozúčtována" in ps["Poznámka"], ps
+    sug1, _, _ = suggest(p_docs, "2026-10", 3, "vatDate", details=[dict(one, id="d400")])
+    assert sug1[0][TEMPLATE["costCenter"]] == "Praha" and sug1[0][TEMPLATE["activity"]] == "SPRAVA"
+    # the month check splits that row's accrual 60/40 and keeps SPRAVA on both parts
+    p = os.path.join(scratch.name, "seznam_ps.csv")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(";".join(TEMPLATE.values()) + "\n")
+        f.write(";".join(text(ps[h]) for h in TEMPLATE.values()) + "\n")
+    lst = normalize(p, {"columns": TEMPLATE})
+    res = match(lst, p_docs, "2026-11", "vatDate", 3, "o", today=dt.date(2026, 12, 15))
+    apply_details(res, [det_ps])
+    split = res["missing"][0]["split"]
+    assert [(round(s["share"], 2), s["costCenter"], s["activity"]) for s in split] == [
+        (0.6, "Praha", "SPRAVA"),
+        (0.4, "Brno", "SPRAVA"),
+    ], split
+    # addrows: a regular supplier missing from the list goes into a copy of the list
+    k_docs = [
+        doc(500, "06418273", "Kávový servis Aroma s.r.o.", "2026-07-20", 2400, "Káva", acc="518100"),
+        doc(501, "06418273", "Kávový servis Aroma s.r.o.", "2026-09-20", 2400, "Káva", acc="518100"),
+    ]
+    tmp = scratch.name
+    src = os.path.join(tmp, "seznam.csv")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write("Dodavatel;IČ;Částka\nA s.r.o.;12345678;100\n")
+    prof = {"source": {"headerRow": 1}, "columns": {"name": "Dodavatel", "ic": "IČ", "amount": "Částka"}}
+    res = match(normalize(src, prof), k_docs, "2026-10", "vatDate", 3, "o", today=dt.date(2026, 11, 15))
+    added = added_rows(res, k_docs, None, False)
+    assert len(added) == 1, added
+    kav = added[0]
+    assert kav[TEMPLATE["ic"]] == "06418273" and kav[TEMPLATE["amount"]] == 2400, kav
+    assert kav[TEMPLATE["frequency"]] == "měsíčně" and kav[TEMPLATE["account"]] == "518100", kav
+    assert kav["_detailId"] == "d501", kav
+    with open(src, "rb") as fb:
+        before = fb.read()
+    out = os.path.join(tmp, "seznam_doplneno.csv")
+    unmapped = write_copy(src, out, prof, added)
+    with open(src, "rb") as fb:
+        assert fb.read() == before
+    with open(out, encoding="utf-8") as f:
+        assert ";06418273;" in f.read()
+    back = normalize(out, prof)["rows"]
+    assert len(back) == 2 and back[1]["ic"] == "06418273" and back[1]["amount"] == 2400, back
+    assert {"frequency", "account"} <= {u["field"] for u in unmapped}, unmapped
+    write_copy(src, out, prof, [dict(kav, **{TEMPLATE["name"]: 'Káva "Aroma" s.r.o.'})])
+    assert normalize(out, prof)["rows"][1]["name"] == 'Káva "Aroma" s.r.o.'
+    assert added_rows(res, k_docs, None, False, [{"ic": "06418273", "name": ""}]) == []
+    # a one-off invoice next to a regular payment is never added as a monthly row
+    four = ["2026-07", "2026-08", "2026-09", "2026-10"]
+    rent = [doc(600 + j, "11111111", "Nájmy s.r.o.", f"{m}-03", 5000, "Nájem kanceláře") for j, m in enumerate(four)]
+    rent.append(doc(610, "11111111", "Nájmy s.r.o.", "2026-10-20", 900, "Vyúčtování energií"))
+    assert [r[TEMPLATE["keyword"]] for r in supplier_rows(rent, four, 4, "vatDate", default_freq="měsíčně")] == [
+        "Nájem"
+    ]
+    try:
+        write_copy(src, src, prof, added)
+        raise AssertionError("write_copy overwrote the original")
+    except SystemExit:
+        pass
+    try:
+        import openpyxl
+    except ImportError:
+        openpyxl = None
+    if openpyxl:
+        xs = os.path.join(tmp, "seznam.xlsx")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Seznam"
+        ws.append(["Dodavatel", "IČ", "Částka"])
+        ws.append(["A s.r.o.", "12345678", 100])
+        ws["E2"] = "=C2*2"
+        wb.save(xs)
+        xout = os.path.join(tmp, "seznam_doplneno.xlsx")
+        write_copy(xs, xout, dict(prof, source={"sheet": "Seznam", "headerRow": 1}), added)
+        ws = openpyxl.load_workbook(xout)["Seznam"]
+        assert ws["B3"].value == "06418273" and ws["B3"].number_format == "@", ws["B3"].value
+        assert ws["E2"].value == "=C2*2" and ws["A3"].value == "Kávový servis Aroma s.r.o."
+    scratch.cleanup()
     print("selftest OK")
 
 
@@ -2089,6 +2387,14 @@ def main():
     p.add_argument("--end", required=True)
     p.add_argument("--months", type=int, default=6)
     p.add_argument("--date-field", default="vatDate", choices=["vatDate", "acceptDate"])
+    p.add_argument("--details", help="get_document responses for the printed detailIds (collect --kind details)")
+    p.add_argument("--out", required=True)
+    p = sub.add_parser("addrows")
+    p.add_argument("--xls", required=True)
+    p.add_argument("--profile", required=True, help="profile JSON or 'template'")
+    p.add_argument("--result", required=True)
+    p.add_argument("--docs", required=True)
+    p.add_argument("--details", help="get_document responses for the printed detailIds (collect --kind details)")
     p.add_argument("--out", required=True)
     p = sub.add_parser("collect")
     p.add_argument("inputs", nargs="+")
@@ -2102,6 +2408,7 @@ def main():
         "release": cmd_release,
         "report": cmd_report,
         "suggest": cmd_suggest,
+        "addrows": cmd_addrows,
         "collect": cmd_collect,
         "selftest": lambda _: selftest(),
     }[a.cmd](a)

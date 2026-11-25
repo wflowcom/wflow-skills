@@ -18,20 +18,25 @@ def text(v):
     return s[:-2] if s.endswith(".0") and s[:-2].lstrip("-").isdigit() else s
 
 
+def read_csv(path):
+    """-> (encoding, dialect, rows)"""
+    for enc in ("utf-8-sig", "cp1250"):
+        try:
+            with open(path, encoding=enc) as f:
+                raw = f.read()
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise SystemExit("Cannot decode CSV (tried utf-8, cp1250)")
+    dialect = csv.Sniffer().sniff(raw[:4000], delimiters=",;\t")
+    return enc, dialect, list(csv.reader(io.StringIO(raw), dialect))
+
+
 def read_book(path, sheet=None):
     """-> {sheet name: list of rows (lists of raw values)}"""
     if path.lower().endswith(".csv"):
-        for enc in ("utf-8-sig", "cp1250"):
-            try:
-                with open(path, encoding=enc) as f:
-                    raw = f.read()
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            raise SystemExit("Cannot decode CSV (tried utf-8, cp1250)")
-        dialect = csv.Sniffer().sniff(raw[:4000], delimiters=",;\t")
-        return {"csv": [r for r in csv.reader(io.StringIO(raw), dialect)]}
+        return {"csv": read_csv(path)[2]}
     from openpyxl import load_workbook
 
     wb = load_workbook(path, read_only=True, data_only=True)

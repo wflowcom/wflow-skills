@@ -166,7 +166,8 @@ Sheets: Souhrn (summary, with warnings and list issues), Podklad pro dohady (acc
 Ke kontrole (to check), and Rozpuštění <previous month> (release) when releasing. The project column appears
 only when some value is filled. In chat: a short table – missing (count + total), arrived (of which not in
 ERP), to check, and for the release: to release / still missing. Then list the missing rows (company,
-description, amount) and every "Ke kontrole" item in one line each. Do not advise on the booking itself –
+description, amount) and every "Ke kontrole" item in one line each. Amounts quoted in chat are without VAT
+(with VAT when the list's amounts are with VAT), as in the Excel. Do not advise on the booking itself –
 that is the accountant's call.
 
 ### 6. Next step (always ask)
@@ -174,10 +175,23 @@ that is the accountant's call.
 One multiple-choice question with what applies, recommended first:
 - **Save the mapping to wflow** (only when the mapping is new or changed) – write the profile as in
   `missing-recurring-invoices/references/mapping-profile.md` ("Write"), with `dateField`.
-- **Add the suppliers missing from the list** – only when "Ke kontrole" has items of the kind "Pravidelný
-  dodavatel mimo seznam" (regular supplier not on the list), and only those suppliers (never one-off invoices
-  from other review items, e.g. foreign currency without a rate): give the rows in the template columns ready
-  to paste.
+- **Add the suppliers to the list** – only when "Ke kontrole" has items of the kind "Pravidelný dodavatel mimo
+  seznam" (regular supplier not on the list). The script adds only those suppliers, never one-off invoices from
+  other review items. The original list is never changed; the result is a copy next to it:
+  1. `python missing-recurring-invoices/scripts/recurring_check.py addrows --xls <list file> --profile profile.json|template --result result.json --docs docs.json --out <list name>_doplneno.<same extension>`
+  2. `get_document` for every id in its `detailIds`, each response saved unchanged, then
+     `python missing-recurring-invoices/scripts/recurring_check.py collect det1.json … --kind details --out added-details.json`.
+  3. Run `addrows` again with the same arguments plus `--details added-details.json` – it fills the accounting
+     codes the same way as Mode 2 (a split latest invoice leaves them empty, with a note).
+  4. Say in chat: which suppliers were added (name, amount, frequency), the `notes`, and the `unmapped` values
+     (the list has no column for them, so they are not in the copy). Say that images, charts and some
+     formatting of the original may be missing in the copy. Cowork: hand the copy over as
+     `missing-recurring-invoices/references/environment.md` describes for the output Excel.
+  5. Check the month again with the copy, so the added suppliers get their accrual now: `normalize` the copy
+     with the same profile → `match` with the same arguments → `get_document` only for `detailIds` not read
+     yet → `collect --kind details` over all detail responses → `release` again when releasing → `report` to
+     the same output name (it replaces the accruals Excel). Summarise as in "5. Output" and ask the next step again
+     (without this option).
 - **Done** – and say in one line: next month attach this Excel (edited to match the booking if needed) and the
   accruals for <month> will be released together with the new check.
 
@@ -190,6 +204,13 @@ One multiple-choice question with what applies, recommended first:
    description, each with its own keyword, amount and account. Amount = median of the last 3 invoices without
    VAT (in CZK; foreign currency converted by the invoice rate, with a note). An invoice cancelled by a credit
    note on the full amount is left out. One supplier under two IČ (typo) is merged into one row with a note.
+   Accounting codes: call `get_document` for every id in the output's `detailIds` (the latest invoice of each
+   row), save each response unchanged as a file, run
+   `python missing-recurring-invoices/scripts/recurring_check.py collect det1.json … --kind details --out details.json`,
+   then run `suggest` again with the same arguments plus `--details details.json`. That fills cost centre,
+   contract, project, activity and account from the latest invoice. When that invoice is split across cost
+   centres / contracts, the row's codes stay empty on purpose (its note says so): the month check then splits
+   the accrual by that invoice, which a filled code would prevent.
 3. Read the output before handing the Excel over:
    - `unclear` = a supplier with several invoices a month the script could not split. Look at those invoices
      (`docs.json`) yourself; if you can tell the payments apart, fix the rows in the Excel (keyword, amount,
@@ -203,8 +224,8 @@ One multiple-choice question with what applies, recommended first:
 4. Show the proposed rows as a table (company, keyword, amount, frequency, account).
 5. **Next step (always ask):** "Check <month> with this list right away?" – **yes** (recommended: run Mode 1
    with this file and profile `template`, same organization, month and date, no mapping questions) / **I'll
-   edit the list first** (say: fill cost centre / contract / activity where you want them fixed, then attach
-   it again) / **done**.
+   edit the list first** (say: fill or change cost centre / contract / activity only where you want them fixed
+   – an empty code is taken from the latest invoice at each check – then attach it again) / **done**.
 
 ## Common rules
 
@@ -222,4 +243,4 @@ One multiple-choice question with what applies, recommended first:
   Excel.
 - `missing-recurring-invoices/scripts/inspect_xls.py` – layout of the list.
 - `missing-recurring-invoices/scripts/recurring_check.py` – `collect`, `normalize`, `match`, `release`,
-  `report`, `suggest`, `selftest`.
+  `report`, `suggest`, `addrows`, `selftest`.
